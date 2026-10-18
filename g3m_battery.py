@@ -37,6 +37,8 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from typing import Optional
 
+__version__ = "1.0.0"
+
 # ---------------------------------------------------------------- Win32 常量
 GENERIC_READ = 0x80000000
 GENERIC_WRITE = 0x40000000
@@ -467,6 +469,8 @@ def main(argv: list[str]) -> int:
 
     ap = argparse.ArgumentParser(
         description="读取 HECATE G3M PRO 鼠标电量与充电状态")
+    ap.add_argument("--version", action="version",
+                    version=f"%(prog)s {__version__}")
     ap.add_argument("-n", "--repeat", type=int, default=1, help="连续读取次数")
     ap.add_argument("-i", "--interval", type=float, default=5.0, help="间隔秒数")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出")

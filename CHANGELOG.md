@@ -1,0 +1,34 @@
+# Changelog
+
+本项目的所有重要变更都记录在这里。
+
+格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
+版本号遵循 [语义化版本 SemVer](https://semver.org/lang/zh-CN/)。
+
+## [Unreleased]
+
+## [1.0.0] - 2026-10-19
+
+### Added
+
+- 托盘图标：电池形状，填充比例与颜色随电量变化，鼠标悬停显示百分比
+- 桌面悬浮窗：置顶、可拖动、记住位置、每 30 秒自动刷新
+- 低电量三档配色：>50% 绿 / 21–50% 琥珀 / ≤20% 红（数字、进度条、托盘图标同步）
+- 充电状态显示：使用中 / 充电中 / 已充满
+- 命令行模式，支持 `--json`、`--raw`、`--frame`、`--list`、`-n/-i`、`--version`
+- 开机自启安装 / 移除脚本
+- 托盘图标运行时自动生成（仓库不含二进制 .ico）
+- 逆向出的 HID 协议文档：`docs/findings-static.md`
+- 逆向过程探针脚本存档：`recon/`
+
+### Changed
+
+- 100% 且插线时显示「已充满」（设备固件不会上报 `state=2`）
+- 「放电中」文案改为「使用中」
+
+### Fixed
+
+- 无
+
+[Unreleased]: https://github.com/Nefeli0721/g3m-battery/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Nefeli0721/g3m-battery/releases/tag/v1.0.0

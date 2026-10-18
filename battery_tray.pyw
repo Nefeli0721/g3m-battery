@@ -485,6 +485,8 @@ class BatteryApp:
         self.menu.add_command(label="立即刷新", command=self._force_refresh)
         self.menu.add_command(label="显示/隐藏悬浮窗", command=self.window.toggle)
         self.menu.add_separator()
+        self.menu.add_command(label=f"v{g3m_battery.__version__}", state="disabled")
+        self.menu.add_separator()
         self.menu.add_command(label="退出", command=self.quit)
 
         if show_window:
