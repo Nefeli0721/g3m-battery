@@ -7,6 +7,12 @@
 
 ## [Unreleased]
 
+### 修复
+
+- 修复托盘进程随机崩溃：`GetModuleHandleW` 未声明 `restype`，64 位 `HMODULE` 被截断后
+  作为 `hInstance` 传入窗口类注册，触发偶发访问冲突（已同步到 `main` 的 v1.0.1）
+- 退出时等待采样线程结束，避免 Python 3.13+ 在解释器 finalize 阶段报 GIL 致命错误
+
 ## [1.1.0] - 2026-10-19
 
 ### 新增

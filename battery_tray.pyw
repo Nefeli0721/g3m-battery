@@ -595,6 +595,9 @@ class BatteryApp:
             pass
         try:
             self.sampler.stop()
+            # 等采样线程真正退出再结束解释器，否则 daemon 线程会在 finalize 时
+            # 触发 "PyEval_RestoreThread ... GIL" 致命错误（Python 3.13+）
+            self.sampler.join(timeout=2.0)
         except Exception:
             pass
         try:
