@@ -151,6 +151,7 @@ HECATE Connect，它显示的也是"闪电"图标而非"已充满"。因此工�
 ├── remove-autostart.ps1    开机自启移除
 ├── release.py              一键发布（版本号 + CHANGELOG + tag + push）
 ├── CHANGELOG.md            版本变更记录
+├── CONTRIBUTING.md         分支策略与开发流程
 ├── docs/
 │   └── findings-static.md   静态逆向完整报告
 ├── recon/                   逆向过程用的探针脚本（存档）
@@ -161,6 +162,18 @@ HECATE Connect，它显示的也是"闪电"图标而非"已充满"。因此工�
 
 ---
 
+## 分支策略
+
+| 分支 | 定位 | 允许的变更 | 版本号 |
+|---|---|---|---|
+| **`main`** | **轻量化稳定版** | 只收 **bug 修复** 与 **设备适配** | 只发 patch `1.0.x` |
+| **`dev`** | **功能分支** | 所有**新功能**、重构、体验改进 | minor / major `1.1.0`、`2.0.0` |
+
+`main` 的设计目标是**保持轻量**：零依赖、代码量不膨胀、只做"能稳定读到电量"这一件事。
+任何功能加法（通知、多设备管理、面板、插件…）一律进 `dev`，不往 `main` 堆。
+
+详细流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
 ## 版本管理与发布
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)，版本历史见
@@ -168,20 +181,25 @@ HECATE Connect，它显示的也是"闪电"图标而非"已充满"。因此工�
 
 - **唯一版本号来源**：`g3m_battery.py` 里的 `__version__`
   （`python g3m_battery.py --version` 可查看，托盘右键菜单也会显示）
-- 版本号规则：**新增功能 = minor**（1.0.0 → 1.1.0）、**修 bug = patch**（→ 1.0.1）、
-  **破坏兼容 = major**（→ 2.0.0）
+- 规则：**修 bug / 加设备 = patch**、**新功能 = minor**、**破坏兼容 = major**
 - 每次发布都走完整流程：改版本号 → 更新 CHANGELOG → commit → 打 `vX.Y.Z` tag →
   push → 创建 GitHub Release
 
-发布用一条命令（先把功能改动提交完，保持工作区干净）：
+发布用一条命令（先把改动提交完，保持工作区干净）：
 
 ```powershell
-python release.py 1.1.0 "新增低电量通知"
-python release.py 1.0.1 "修复休眠后无法恢复" --dry-run   # 只看计划，不写不改
-python release.py 1.1.0 "..." --no-push                 # 只本地提交打 tag
+# main：修 bug / 加设备（只允许 patch）
+python release.py 1.0.1 "修复休眠后无法恢复" --kind bugfix
+python release.py 1.0.2 "支持 G5M Pro" --kind device
+
+# dev：新功能（minor / major）
+python release.py 1.1.0 "新增低电量通知" --kind feature
+
+python release.py 1.1.0 "..." --dry-run   # 只看计划，不写不改
 ```
 
-脚本会拒绝这些情况：工作区不干净、tag 已存在、不在 `main` 分支、新版本号不大于当前版本。
+`release.py` 会强制拦截：在 `main` 上发新功能、在 `main` 上发 minor/major、
+工作区不干净、tag 已存在、不在 `main`/`dev` 分支、版本号没递增。
 
 ---
 
