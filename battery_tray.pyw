@@ -163,6 +163,10 @@ shell32.Shell_NotifyIconW.argtypes = [
 kernel32.CreateMutexW.restype = wintypes.HANDLE
 kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
 kernel32.GetLastError.restype = wintypes.DWORD
+# 必须显式声明 restype：默认 c_int 会把 64 位 HMODULE 截断成 32 位，
+# 拿它当 hInstance 传给窗口类注册会偶发访问冲突（曾经导致托盘进程随机崩溃）。
+kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
 
 
 def icon_for(percent: int | None) -> str:
