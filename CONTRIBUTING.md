@@ -51,8 +51,10 @@ python release.py 1.1.0 "新增低电量通知" --kind feature
 ## 发布前自检
 
 ```powershell
-python -m py_compile g3m_battery.py battery_tray.pyw make_icons.py release.py
+python -m unittest discover -s tests -v      # 单元测试
+python -m py_compile g3m_battery.py battery_tray.pyw battery_curve.py battery_history.py make_icons.py release.py
 python g3m_battery.py --version
-python g3m_battery.py            # 实机读一次
+python g3m_battery.py                        # 实机读一次
+pythonw battery_tray.pyw --curve             # 打开曲线窗口看一眼
 python release.py <新版本> "说明" --kind <bugfix|device|feature> --dry-run
 ```

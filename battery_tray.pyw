@@ -27,6 +27,10 @@ CONFIG_PATH = os.path.join(HERE, "settings.json")
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import g3m_battery  # noqa: E402
+import battery_history  # noqa: E402
+import battery_curve  # noqa: E402
+
+HISTORY_PATH = os.path.join(HERE, "history.jsonl")
 
 
 def ensure_icons() -> None:
@@ -311,7 +315,10 @@ class Sampler(threading.Thread):
                 else:
                     # 缓慢波动，方便验证界面
                     level = 90 - int((time.time() / 7) % 5)
-                self.out.put(("ok", level, None))
+                fake = g3m_battery.BatteryReading(
+                    percent=level, charge_state=0, payload=bytes(6),
+                    raw=bytes(64))
+                self.out.put(("ok", level, fake))
             else:
                 try:
                     r = g3m_battery.query_battery()
@@ -464,6 +471,9 @@ class BatteryApp:
                  demo_percent: int | None = None):
         self.demo = demo
         self.config = self._load_config()
+        self.history = battery_history.History(HISTORY_PATH)
+        self.last_reading = None
+        self.curve = None
 
         self.root = tk.Tk()
         self.root.withdraw()
@@ -483,6 +493,7 @@ class BatteryApp:
 
         self.menu = tk.Menu(self.root, tearoff=0)
         self.menu.add_command(label="立即刷新", command=self._force_refresh)
+        self.menu.add_command(label="电量曲线…", command=self.show_curve)
         self.menu.add_command(label="显示/隐藏悬浮窗", command=self.window.toggle)
         self.menu.add_separator()
         self.menu.add_command(label=f"v{g3m_battery.__version__}", state="disabled")
@@ -504,15 +515,26 @@ class BatteryApp:
         except Exception:
             return {"interval": 30}
 
-    def save_window_pos(self, x: int, y: int):
-        self.config["window_pos"] = [x, y]
+    def save_config(self) -> None:
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
+    def save_window_pos(self, x: int, y: int):
+        self.config["window_pos"] = [x, y]
+        self.save_config()
+
+    def app_icon_path(self) -> str:
+        return os.path.join(HERE, "app.ico")
+
     # -- 菜单 / 动作 ------------------------------------------------
+    def show_curve(self):
+        if self.curve is None:
+            self.curve = battery_curve.CurveWindow(self.root, self)
+        self.curve.show()
+
     def show_menu(self):
         try:
             x, y = self.tray.cursor_pos()
@@ -539,14 +561,27 @@ class BatteryApp:
             updated = True
             self.window.render(state, percent, detail)
             if state == "ok" and percent is not None:
+                if hasattr(detail, "charge_state"):
+                    self.last_reading = detail
+                    if not self.demo:
+                        try:
+                            self.history.record(percent, int(detail.charge_state))
+                        except Exception:
+                            pass
                 label = getattr(detail, "charge_label", "")
                 tip = f"G3M PRO — 电量 {percent}%"
                 if label and getattr(detail, "charge_state", 0):
                     tip += f"（{label}）"
             else:
+                self.last_reading = None
                 tip = f"G3M PRO — {detail or '未连接'}"
             self.tray.update(percent if state == "ok" else None, tip)
             self.last_percent = percent if state == "ok" else None
+        if updated and self.curve is not None and self.curve.visible:
+            try:
+                self.curve.refresh()
+            except Exception:
+                pass
         self.root.after(150, self._tick)
 
     def quit(self):
@@ -587,6 +622,8 @@ def main(argv: list[str]) -> int:
 
     ensure_icons()
     app = BatteryApp(demo=demo, show_window=show_window, demo_percent=demo_percent)
+    if "--curve" in argv:
+        app.show_curve()
     app.run()
     return 0
 
