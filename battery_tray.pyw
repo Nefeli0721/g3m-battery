@@ -480,6 +480,9 @@ class BatteryApp:
                  demo_percent: int | None = None):
         self.demo = demo
         self.config = self._load_config()
+        if not os.path.exists(CONFIG_PATH):
+            # 首次运行就把默认配置落盘，方便用户查看/手动修改
+            self.save_config()
         self.version = g3m_battery.__version__
         self.history = battery_history.History(HISTORY_PATH)
         self.last_reading = None
