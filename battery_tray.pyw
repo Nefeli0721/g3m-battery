@@ -179,6 +179,7 @@ class TrayIcon:
         self._on_left = on_left
         self._on_right = on_right
         self._on_double = on_double
+        self._pending_actions: list[str] = []
         self._hwnd = None
         self._icon = None
         self._ticon = None
@@ -209,22 +210,25 @@ class TrayIcon:
             raise ctypes.WinError(ctypes.get_last_error())
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
+        # 这里运行在 Windows 消息派发过程中，绝对不能碰 Tk。
+        # 只把动作排队，真正的处理放到 Tk 的 after 回调里（见 _tick）。
         if msg == WM_TRAYICON:
             ev = lparam & 0xFFFF
             if ev == WM_LBUTTONUP:
-                self._on_left()
-                return 0
-            if ev == WM_LBUTTONDBLCLK:
-                self._on_double()
-                return 0
-            if ev in (WM_RBUTTONUP, WM_CONTEXTMENU):
-                self._on_right()
-                return 0
+                self._pending_actions.append("left")
+            elif ev == WM_LBUTTONDBLCLK:
+                self._pending_actions.append("double")
+            elif ev in (WM_RBUTTONUP, WM_CONTEXTMENU):
+                self._pending_actions.append("right")
             return 0
         if msg == self._taskbar_created and self._taskbar_created:
-            self._add()
+            self._pending_actions.append("readd")
             return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def take_actions(self) -> list[str]:
+        actions, self._pending_actions = self._pending_actions, []
+        return actions
 
     def _make_ticon(self) -> NOTIFYICONDATAW:
         nid = NOTIFYICONDATAW()
@@ -265,9 +269,14 @@ class TrayIcon:
             user32.DestroyIcon(old)
 
     def pump(self):
-        """在 Tk 的 after 循环里派发 Win32 消息。"""
+        """只派发**本托盘窗口**的消息。
+
+        关键：不能用 `PeekMessageW(None, ...)` —— 那样会把 Tk 自己窗口的消息
+        也在我们的 DispatchMessage 里派发，造成 Tk 事件循环重入（曾导致
+        进程被 ucrtbase abort）。这里用 hWnd 过滤，只处理自己的。
+        """
         msg = MSG()
-        while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
+        while user32.PeekMessageW(ctypes.byref(msg), self._hwnd, 0, 0, PM_REMOVE):
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
 
@@ -292,7 +301,10 @@ class TrayIcon:
 class Sampler(threading.Thread):
     def __init__(self, interval: float, demo: bool = False,
                  demo_percent: int | None = None):
-        super().__init__(daemon=True)
+        # 非 daemon：避免解释器 finalize 时线程还卡在 Event.wait 里，
+        # 那会触发 "PyEval_RestoreThread ... GIL is released" 致命错误。
+        # 退出流程一定会 stop()+join()。
+        super().__init__(daemon=False)
         self.interval = interval
         self.demo = demo
         self.demo_percent = demo_percent
@@ -486,12 +498,15 @@ class BatteryApp:
         self.sampler.start()
 
         self.menu = tk.Menu(self.root, tearoff=0)
-        self.menu.add_command(label="立即刷新", command=self._force_refresh)
-        self.menu.add_command(label="显示/隐藏悬浮窗", command=self.window.toggle)
+        self.menu.add_command(label="立即刷新",
+                              command=lambda: self._defer(self._force_refresh))
+        self.menu.add_command(label="显示/隐藏悬浮窗",
+                              command=lambda: self._defer(self.window.toggle))
         self.menu.add_separator()
         self.menu.add_command(label=f"v{g3m_battery.__version__}", state="disabled")
         self.menu.add_separator()
-        self.menu.add_command(label="退出", command=self.quit)
+        self.menu.add_command(label="退出",
+                              command=lambda: self._defer(self.quit))
 
         if show_window:
             self.window.show()
@@ -517,12 +532,36 @@ class BatteryApp:
             pass
 
     # -- 菜单 / 动作 ------------------------------------------------
+    def _defer(self, fn) -> None:
+        """把菜单命令推迟到当前菜单事件循环退出后再执行。"""
+        try:
+            self.root.after(0, fn)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _dispatch_tray_action(self, action: str) -> None:
+        """在 Tk 上下文里处理托盘动作（不能在 WNDPROC 里直接调用）。"""
+        if action == "left":
+            self.window.toggle()
+        elif action == "double":
+            self._force_refresh()
+        elif action == "right":
+            self.show_menu()
+        elif action == "readd":
+            try:
+                self.tray._add()
+            except Exception:  # noqa: BLE001
+                pass
+
     def show_menu(self):
         try:
             x, y = self.tray.cursor_pos()
             self.menu.tk_popup(x, y)
         finally:
-            self.menu.grab_release()
+            try:
+                self.menu.grab_release()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _force_refresh(self):
         self.sampler.force()
@@ -531,6 +570,8 @@ class BatteryApp:
     def _tick(self):
         try:
             self.tray.pump()
+            for action in self.tray.take_actions():
+                self._dispatch_tray_action(action)
         except Exception:
             pass
         updated = False
@@ -553,24 +594,47 @@ class BatteryApp:
             self.last_percent = percent if state == "ok" else None
         self.root.after(150, self._tick)
 
-    def quit(self):
+    def shutdown(self) -> None:
+        """幂等清理：停线程、拆托盘窗口。任何退出路径都必须经过这里。"""
+        if getattr(self, "_shutdown_done", False):
+            return
+        self._shutdown_done = True
         try:
-            self.save_window_pos(self.window.win.winfo_x(), self.window.win.winfo_y())
+            self.save_window_pos(self.window.win.winfo_x(),
+                                 self.window.win.winfo_y())
         except Exception:
             pass
-        try:
-            self.sampler.stop()
-        except Exception:
-            pass
+        thread = getattr(self, "sampler", None)
+        if thread is not None:
+            try:
+                thread.stop()
+                if thread.is_alive():
+                    thread.join(timeout=3.0)
+            except Exception:  # noqa: BLE001
+                pass
         try:
             self.tray.destroy()
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
-        self.root.quit()
-        self.root.destroy()
+
+    def quit(self):
+        self.shutdown()
+        try:
+            self.root.quit()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.root.destroy()
+        except Exception:  # noqa: BLE001
+            pass
 
     def run(self):
-        self.root.mainloop()
+        try:
+            self.root.mainloop()
+        finally:
+            # 无论 mainloop 是正常返回、被 quit 还是异常退出，都走同一套清理，
+            # 保证没有线程在解释器 finalize 时还活着。
+            self.shutdown()
 
 
 def main(argv: list[str]) -> int:
@@ -591,7 +655,11 @@ def main(argv: list[str]) -> int:
 
     ensure_icons()
     app = BatteryApp(demo=demo, show_window=show_window, demo_percent=demo_percent)
-    app.run()
+    try:
+        app.run()
+    finally:
+        # 双保险：即使 app.run() 之外的代码抛异常，也不留下活线程
+        app.shutdown()
     return 0
 
 
