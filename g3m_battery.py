@@ -37,7 +37,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from typing import Optional
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # ---------------------------------------------------------------- Win32 常量
 GENERIC_READ = 0x80000000
