@@ -1,23 +1,26 @@
 """一键发布脚本：改版本号 → 写 CHANGELOG → commit → 打 tag → push → 建 GitHub Release。
 
-分支策略（脚本会强制执行）：
-  * ``main`` 是**轻量化稳定分支**，只接受 **bug 修复** 与 **设备适配**，
-    且只发 patch 版本（1.0.x）；新功能一律拒绝。
-  * ``dev`` 是**功能分支**，新功能在这里开发，可发 minor / major 版本。
+分支模型（脚本会强制执行）：
+  * ``main`` = **标准版**。功能最全（托盘 + 悬浮窗 + 电量曲线 + 设置 + 低电量弹窗），
+    新功能在这里发版，可用 minor / major。
+  * ``lite`` = **极简版**。只有托盘 + 悬浮窗 + 命令行，**只接受 bug 修复与设备适配**，
+    且只发 patch 版本（保持 1.0.x 线）。
+  * ``dev``  = **开发/集成分支**。新功能先在这里开发，**不直接发版**，
+    稳定后合并到 main 再发。
 
 用法（在仓库根目录）::
 
-    python release.py 1.0.1 "修复休眠后无法恢复" --kind bugfix      # main 上
-    python release.py 1.1.0 "新增低电量通知" --kind feature          # dev 上
-    python release.py 1.0.2 "支持 G5M Pro" --kind device            # main 上
-    python release.py 1.1.0 "..." --dry-run                        # 只看计划
-    python release.py 1.1.0 "..." --no-push                        # 只本地提交打 tag
+    python release.py 1.3.0 "新增 XXX" --kind feature        # main（标准版）
+    python release.py 1.2.2 "修复 XXX"  --kind bugfix        # main（标准版）
+    python release.py 1.0.2 "修复 XXX"  --kind bugfix        # lite（极简版，仅 patch）
+    python release.py 1.3.0 "..." --dry-run                 # 只看计划
+    python release.py 1.3.0 "..." --no-push                 # 只本地提交打 tag
 
 约定：
   * `g3m_battery.py` 里的 `__version__` 是**唯一版本号来源**
   * 版本号遵循 SemVer：新增功能 = minor，修 bug / 加设备 = patch，破坏兼容 = major
   * 发布前工作区必须是干净的（先提交你的改动）
-  * tag 形如 `v1.0.1`，会推到 origin 并创建 GitHub Release（需已 `gh auth login`）
+  * tag 形如 `v1.3.0`，会推到 origin 并创建 GitHub Release（需已 `gh auth login`）
 """
 from __future__ import annotations
 
@@ -43,7 +46,7 @@ KIND_SECTION = {
     "device": ("设备支持", "设备适配"),
 }
 
-ALLOWED_BRANCHES = ("main", "dev")
+ALLOWED_BRANCHES = ("main", "lite")
 
 
 def run(cmd: list[str], check: bool = True, capture: bool = False) -> str:
@@ -123,26 +126,32 @@ def check_tag_free(tag: str) -> None:
 def check_branch(kind: str) -> str:
     """校验当前分支与发布类型是否匹配，返回分支名。"""
     branch = git("rev-parse", "--abbrev-ref", "HEAD", capture=True).strip()
+    if branch == "dev":
+        raise SystemExit(
+            "dev 是开发/集成分支，不直接发版。\n"
+            "请先合并到标准版再发：\n"
+            "  git switch main\n"
+            "  git merge dev")
     if branch not in ALLOWED_BRANCHES:
         raise SystemExit(
             f"当前分支是 {branch}，发布只能在 {' / '.join(ALLOWED_BRANCHES)} 上进行。\n"
-            "  main = 轻量稳定版（bug 修复 / 设备适配）\n"
-            "  dev  = 功能分支（新功能）")
-    if branch == "main" and kind == "feature":
+            "  main = 标准版（功能最全）\n"
+            "  lite = 极简版（只收 bug 修复 / 设备适配）")
+    if branch == "lite" and kind == "feature":
         raise SystemExit(
-            "main 是轻量化稳定分支，只接受 bug 修复与设备适配。\n"
-            "新功能请切到功能分支再发布：\n"
-            "  git switch dev")
+            "lite 是极简版，只接受 bug 修复与设备适配，不接受新功能。\n"
+            "新功能请走开发流程：dev → main")
     return branch
 
 
 def check_bump_on_branch(branch: str, old: str, new: str) -> None:
     old_t, new_t = parse_semver(old), parse_semver(new)
-    if branch == "main" and new_t[:2] != old_t[:2]:
+    if branch == "lite" and new_t[:2] != old_t[:2]:
         raise SystemExit(
-            f"main 只发 patch 版本（{old_t[0]}.{old_t[1]}.x），"
-            f"{old} -> {new} 属于 {('minor' if new_t[:1] == old_t[:1] else 'major')} 升级。\n"
-            "功能版本请在 dev 分支发布。")
+            f"lite 只发 patch 版本（{old_t[0]}.{old_t[1]}.x），"
+            f"{old} -> {new} 属于 "
+            f"{'minor' if new_t[:1] == old_t[:1] else 'major'} 升级。\n"
+            "功能版本请在标准版 main 上发布。")
     if new_t <= old_t:
         raise SystemExit(f"新版本 {new} 必须大于当前版本 {old}")
 
