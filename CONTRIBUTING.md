@@ -10,15 +10,25 @@
 
 ## 典型流程
 
-**加新功能**
+**加新功能（走 PR）**
 
 ```powershell
 git switch dev
 # ...开发、提交...
 git commit -am "feat: 一个有趣的新功能"
-# 自测通过后合并到标准版
+git push -u origin dev
+
+# 开一个草稿 PR（先方便看 diff / 跑 CI）
+gh pr create --base main --head dev --draft `
+  --title "feat: 一个有趣的新功能" --body "做了什么、怎么验证的"
+
+# 自测通过、CI 变绿后转正式并合并
+gh pr ready <PR编号>
+gh pr merge <PR编号> --merge
+
+# 合并后从标准版发版
 git switch main
-git merge dev
+git pull
 python release.py 1.3.0 "新增一个有趣的新功能" --kind feature
 ```
 
@@ -39,6 +49,20 @@ python release.py 1.0.2 "修复某个问题" --kind bugfix
 ```
 
 修在 `main` 上的问题通常要**手动移植**到 `lite`（两条线代码不同，不能直接 merge 新功能过去）。
+
+## 持续集成（CI）
+
+`.github/workflows/ci.yml` 会在 **push 到 main / dev / lite** 以及 **向 main / dev 提 PR** 时运行：
+
+1. 编译所有 `.py` / `.pyw`（语法检查）
+2. 运行 `tests/` 下的单元测试（`lite` 没有测试目录，会自动跳过）
+
+在 PR 页面能看到 ✅ / ❌；红了就别合。
+
+## 分支保护
+
+`main` 已开启：**禁止强推（force push）和删除分支**，避免误操作丢历史。
+没有强制要求走 PR —— 发版提交（`chore(release)`）需要直接推 `main`，强制 PR 反而添麻烦。
 
 ## `release.py` 强制校验
 
