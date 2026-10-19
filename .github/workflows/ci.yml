@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev, lite]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 语法检查（编译所有 .py / .pyw）
+        shell: python
+        run: |
+          import pathlib
+          import py_compile
+
+          files = [p for p in pathlib.Path(".").rglob("*")
+                   if p.suffix in {".py", ".pyw"} and ".git" not in p.parts]
+          for path in files:
+              py_compile.compile(str(path), doraise=True)
+          print(f"compiled {len(files)} files OK")
+
+      - name: 单元测试
+        if: hashFiles('tests/**/*.py') != ''
+        run: python -m unittest discover -s tests -v
