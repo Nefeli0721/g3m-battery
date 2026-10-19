@@ -1,40 +1,51 @@
-# 贡献与分支策略
+# 贡献与分支模型
 
-## 分支模型
+## 三条分支
 
-| 分支 | 定位 | 允许的变更 | 版本号 |
-|---|---|---|---|
-| **`main`** | **轻量化稳定版** | 只收 **bug 修复** 和 **设备适配**（新增 VID/PID） | 只发 patch：`1.0.x` |
-| **`dev`** | **功能分支** | 所有**新功能**、重构、体验改进 | minor / major：`1.1.0`、`2.0.0` |
+| 分支 | 定位 | 包含功能 | 允许的变更 | 版本号 |
+|---|---|---|---|---|
+| **`main`** | **标准版**（默认分支） | 托盘 + 悬浮窗 + 电量曲线 + 设置页 + 低电量弹窗 | 全部：新功能 / 修复 / 设备适配 | minor / major / patch |
+| **`lite`** | **极简版** | 托盘 + 悬浮窗 + 命令行（无曲线 / 设置 / 弹窗） | 只收 **bug 修复** 与 **设备适配** | 只发 patch，保持 `1.0.x` |
+| **`dev`** | **开发/集成分支** | 与 `main` 同步 + 正在开发的功能 | 所有新功能先在这里 | 不直接发版 |
 
-`main` 的目标是**保持轻量**：代码量不膨胀、零依赖不变、不做功能加法。
-任何会让工具变"重"的改动（新面板、通知系统、多设备管理、插件机制…）一律走 `dev`。
+## 典型流程
 
-### 典型流程
-
-**修 bug / 加设备（走 main）**
-
-```powershell
-git switch main
-# ...改代码...
-git commit -am "fix: 修复休眠唤醒后首次读取失败"
-python release.py 1.0.1 "修复休眠唤醒后首次读取失败" --kind bugfix
-```
-
-**加新功能（走 dev）**
+**加新功能**
 
 ```powershell
 git switch dev
-# ...开发功能...
-git commit -am "feat: 低电量 Windows 通知"
-python release.py 1.1.0 "新增低电量通知" --kind feature
+# ...开发、提交...
+git commit -am "feat: 一个有趣的新功能"
+# 自测通过后合并到标准版
+git switch main
+git merge dev
+python release.py 1.3.0 "新增一个有趣的新功能" --kind feature
 ```
 
-`release.py` 会**强制校验**：
+**修 bug（标准版）**
 
-- 在 `main` 上发布 `--kind feature` → 直接拒绝，并提示切到 `dev`
-- 在 `main` 上发布 minor/major 版本 → 拒绝，只允许 patch
-- 不在 `main` / `dev` 上 → 拒绝
+```powershell
+git switch main
+git commit -am "fix: 修复某个问题"
+python release.py 1.2.2 "修复某个问题" --kind bugfix
+```
+
+**修 bug（极简版）**
+
+```powershell
+git switch lite
+git commit -am "fix: 修复某个问题"
+python release.py 1.0.2 "修复某个问题" --kind bugfix
+```
+
+修在 `main` 上的问题通常要**手动移植**到 `lite`（两条线代码不同，不能直接 merge 新功能过去）。
+
+## `release.py` 强制校验
+
+- 在 `dev` 上发布 → 拒绝，提示先合并到 `main`
+- 在 `lite` 上发布 `--kind feature` → 拒绝
+- 在 `lite` 上发 minor / major → 拒绝，只允许 patch
+- 不在 `main` / `lite` 上 → 拒绝
 - 工作区不干净、tag 已存在、版本号没递增 → 拒绝
 
 ## 提交信息
@@ -43,7 +54,7 @@ python release.py 1.1.0 "新增低电量通知" --kind feature
 
 | 前缀 | 用途 | 示例 |
 |---|---|---|
-| `feat:` | 新功能（仅 `dev`） | `feat: 低电量通知` |
+| `feat:` | 新功能（在 `dev` 开发） | `feat: 低电量通知` |
 | `fix:` | bug 修复 | `fix: 休眠后无法恢复` |
 | `feat(device):` | 新增设备支持 | `feat(device): 支持 G5M Pro` |
 | `docs:` / `chore:` | 文档、脚本、杂项 | `docs: 补充协议说明` |
@@ -58,3 +69,6 @@ python g3m_battery.py                        # 实机读一次
 pythonw battery_tray.pyw --curve             # 打开曲线窗口看一眼
 python release.py <新版本> "说明" --kind <bugfix|device|feature> --dry-run
 ```
+
+> 在 `lite` 分支上，`battery_curve.py` / `battery_popup.py` / `steam_watch.py` /
+> `app_settings.py` / `settings_window.py` 这些文件不存在，只编译存在的文件即可。

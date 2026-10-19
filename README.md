@@ -248,15 +248,18 @@ HECATE Connect，它显示的也是"闪电"图标而非"已充满"。因此工�
 
 ---
 
-## 分支策略
+## 分支模型
 
-| 分支 | 定位 | 允许的变更 | 版本号 |
-|---|---|---|---|
-| **`main`** | **轻量化稳定版** | 只收 **bug 修复** 与 **设备适配** | 只发 patch `1.0.x` |
-| **`dev`** | **功能分支** | 所有**新功能**、重构、体验改进 | minor / major `1.1.0`、`2.0.0` |
+| 分支 | 定位 | 包含功能 | 允许的变更 | 版本号 |
+|---|---|---|---|---|
+| **`main`** | **标准版**（默认） | 托盘 + 悬浮窗 + 电量曲线 + 设置页 + 低电量弹窗 | 全部（新功能 / 修复 / 设备） | minor / major / patch |
+| **`lite`** | **极简版** | 托盘 + 悬浮窗 + 命令行（无曲线 / 设置 / 弹窗） | 只收 **bug 修复** 与 **设备适配** | 只发 patch，保持 `1.0.x` |
+| **`dev`** | **开发分支** | 与 main 同步 + 正在开发的新功能 | 所有新功能先在这里 | 不直接发版 |
 
-`main` 的设计目标是**保持轻量**：零依赖、代码量不膨胀、只做"能稳定读到电量"这一件事。
-任何功能加法（通知、多设备管理、面板、插件…）一律进 `dev`，不往 `main` 堆。
+流程：新功能在 `dev` 开发 → 稳定后合并到 `main` → 从 `main` 发版。
+**`dev` 不直接发版**，`release.py` 会拦截。
+
+`lite` 是给"只想要一个能看电量的托盘"的人用的：零依赖、代码量最小、只做一件事。
 
 详细流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
@@ -274,18 +277,18 @@ HECATE Connect，它显示的也是"闪电"图标而非"已充满"。因此工�
 发布用一条命令（先把改动提交完，保持工作区干净）：
 
 ```powershell
-# main：修 bug / 加设备（只允许 patch）
-python release.py 1.0.1 "修复休眠后无法恢复" --kind bugfix
-python release.py 1.0.2 "支持 G5M Pro" --kind device
+# main（标准版）：新功能 / 修复
+python release.py 1.3.0 "新增 XXX" --kind feature
+python release.py 1.2.2 "修复 XXX" --kind bugfix
 
-# dev：新功能（minor / major）
-python release.py 1.1.0 "新增低电量通知" --kind feature
+# lite（极简版）：只允许 patch 级别的修复
+python release.py 1.0.2 "修复 XXX" --kind bugfix
 
-python release.py 1.1.0 "..." --dry-run   # 只看计划，不写不改
+python release.py 1.3.0 "..." --dry-run   # 只看计划，不写不改
 ```
 
-`release.py` 会强制拦截：在 `main` 上发新功能、在 `main` 上发 minor/major、
-工作区不干净、tag 已存在、不在 `main`/`dev` 分支、版本号没递增。
+`release.py` 会强制拦截：在 `dev` 上直接发版、在 `lite` 上发新功能、
+在 `lite` 上发 minor/major、工作区不干净、tag 已存在、版本号没递增。
 
 ---
 
