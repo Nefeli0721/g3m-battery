@@ -94,7 +94,9 @@ class SteamWatcher(threading.Thread):
 
     def __init__(self, interval: float = 5.0,
                  reader: Callable[[], dict[str, str]] = read_running_apps):
-        super().__init__(daemon=True)
+        # 非 daemon：退出时必须显式 stop()+join()，避免解释器 finalize 时
+        # 线程还卡在 wait 里导致 GIL 致命错误。
+        super().__init__(daemon=False)
         self.interval = interval
         self.reader = reader
         self.tracker = GameTracker()
