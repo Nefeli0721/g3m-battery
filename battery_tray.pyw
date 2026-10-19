@@ -27,6 +27,15 @@ CONFIG_PATH = os.path.join(HERE, "settings.json")
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 import g3m_battery  # noqa: E402
+import battery_history  # noqa: E402
+import battery_curve  # noqa: E402
+import battery_popup  # noqa: E402
+import steam_watch  # noqa: E402
+import app_settings  # noqa: E402
+import settings_window  # noqa: E402
+
+HISTORY_PATH = os.path.join(HERE, "history.jsonl")
+STARTUP_VBS = os.path.join(HERE, "start_tray.vbs")
 
 
 def ensure_icons() -> None:
@@ -179,6 +188,7 @@ class TrayIcon:
         self._on_left = on_left
         self._on_right = on_right
         self._on_double = on_double
+        self._pending_actions: list[str] = []
         self._hwnd = None
         self._icon = None
         self._ticon = None
@@ -209,22 +219,25 @@ class TrayIcon:
             raise ctypes.WinError(ctypes.get_last_error())
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
+        # 注意：这里运行在 Windows 消息派发过程中，绝对不能碰 Tk。
+        # 只把动作排队，真正的处理放到 Tk 的 after 回调里（见 _tick）。
         if msg == WM_TRAYICON:
             ev = lparam & 0xFFFF
             if ev == WM_LBUTTONUP:
-                self._on_left()
-                return 0
-            if ev == WM_LBUTTONDBLCLK:
-                self._on_double()
-                return 0
-            if ev in (WM_RBUTTONUP, WM_CONTEXTMENU):
-                self._on_right()
-                return 0
+                self._pending_actions.append("left")
+            elif ev == WM_LBUTTONDBLCLK:
+                self._pending_actions.append("double")
+            elif ev in (WM_RBUTTONUP, WM_CONTEXTMENU):
+                self._pending_actions.append("right")
             return 0
         if msg == self._taskbar_created and self._taskbar_created:
-            self._add()
+            self._pending_actions.append("readd")
             return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def take_actions(self) -> list[str]:
+        actions, self._pending_actions = self._pending_actions, []
+        return actions
 
     def _make_ticon(self) -> NOTIFYICONDATAW:
         nid = NOTIFYICONDATAW()
@@ -265,9 +278,14 @@ class TrayIcon:
             user32.DestroyIcon(old)
 
     def pump(self):
-        """在 Tk 的 after 循环里派发 Win32 消息。"""
+        """只派发**本托盘窗口**的消息。
+
+        关键：不能用 `PeekMessageW(None, ...)` —— 那样会把 Tk 自己窗口的消息
+        也在我们的 DispatchMessage 里派发，造成 Tk 事件循环重入（曾导致
+        进程被 ucrtbase abort）。这里用 hWnd 过滤，只处理自己的。
+        """
         msg = MSG()
-        while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
+        while user32.PeekMessageW(ctypes.byref(msg), self._hwnd, 0, 0, PM_REMOVE):
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
 
@@ -292,7 +310,10 @@ class TrayIcon:
 class Sampler(threading.Thread):
     def __init__(self, interval: float, demo: bool = False,
                  demo_percent: int | None = None):
-        super().__init__(daemon=True)
+        # 非 daemon：避免解释器 finalize 时线程还卡在 Event.wait 里，
+        # 那会触发 "PyEval_RestoreThread ... GIL is released" 致命错误。
+        # 退出流程一定会 stop()+join()。
+        super().__init__(daemon=False)
         self.interval = interval
         self.demo = demo
         self.demo_percent = demo_percent
@@ -315,7 +336,10 @@ class Sampler(threading.Thread):
                 else:
                     # 缓慢波动，方便验证界面
                     level = 90 - int((time.time() / 7) % 5)
-                self.out.put(("ok", level, None))
+                fake = g3m_battery.BatteryReading(
+                    percent=level, charge_state=0, payload=bytes(6),
+                    raw=bytes(64))
+                self.out.put(("ok", level, fake))
             else:
                 try:
                     r = g3m_battery.query_battery()
@@ -468,6 +492,24 @@ class BatteryApp:
                  demo_percent: int | None = None):
         self.demo = demo
         self.config = self._load_config()
+        if not os.path.exists(CONFIG_PATH):
+            # 首次运行就把默认配置落盘，方便用户查看/手动修改
+            self.save_config()
+        self.version = g3m_battery.__version__
+        self.history = battery_history.History(HISTORY_PATH)
+        self.last_reading = None
+        self.curve = None
+        self.settings_window = None
+
+        # 低电量弹窗状态
+        self._popup = None
+        self._popup_last = 0.0
+        self._popup_done_for_cycle = False
+        self._last_game_name = ""
+
+        # Steam 游戏监视（5 秒一次，读 Steam 自己维护的注册表）
+        self.steam_watcher = steam_watch.SteamWatcher(interval=5.0)
+        self.steam_watcher.start()
 
         self.root = tk.Tk()
         self.root.withdraw()
@@ -486,14 +528,27 @@ class BatteryApp:
         self.sampler.start()
 
         self.menu = tk.Menu(self.root, tearoff=0)
-        self.menu.add_command(label="立即刷新", command=self._force_refresh)
-        self.menu.add_command(label="显示/隐藏悬浮窗", command=self.window.toggle)
+        self.menu.add_command(label="立即刷新",
+                              command=lambda: self._defer(self._force_refresh))
+        self.menu.add_command(label="电量曲线…",
+                              command=lambda: self._defer(self.show_curve))
+        self.menu.add_command(label="设置…",
+                              command=lambda: self._defer(self.show_settings))
+        self.menu.add_command(label="显示/隐藏悬浮窗",
+                              command=lambda: self._defer(self.window.toggle))
         self.menu.add_separator()
-        self.menu.add_command(label=f"v{g3m_battery.__version__}", state="disabled")
+        self.menu.add_command(label="测试低电量弹窗",
+                              command=lambda: self._defer(self._test_popup))
         self.menu.add_separator()
-        self.menu.add_command(label="退出", command=self.quit)
+        self.menu.add_command(label=f"v{self.version}", state="disabled")
+        self.menu.add_separator()
+        self.menu.add_command(label="退出",
+                              command=lambda: self._defer(self.quit))
 
-        if show_window:
+        # 应用持久化设置
+        self.apply_runtime_setting("widget_topmost")
+        self.apply_runtime_setting("widget_opacity")
+        if show_window and self.get_setting("show_widget_on_start", True):
             self.window.show()
 
         self.root.after(100, self._tick)
@@ -504,25 +559,171 @@ class BatteryApp:
     def _load_config(self) -> dict:
         try:
             with open(CONFIG_PATH, encoding="utf-8") as f:
-                return json.load(f)
+                loaded = json.load(f)
         except Exception:
-            return {"interval": 30}
+            loaded = {}
+        return app_settings.merge(loaded)
 
-    def save_window_pos(self, x: int, y: int):
-        self.config["window_pos"] = [x, y]
+    def save_config(self) -> None:
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
+    def save_window_pos(self, x: int, y: int):
+        self.config["window_pos"] = [x, y]
+        self.save_config()
+
+    def app_icon_path(self) -> str:
+        return os.path.join(HERE, "app.ico")
+
     # -- 菜单 / 动作 ------------------------------------------------
+    def show_settings(self) -> None:
+        if self.settings_window is None:
+            self.settings_window = settings_window.SettingsWindow(self.root, self)
+        self.settings_window.show()
+
+    # -- 配置读写 ---------------------------------------------------
+    def get_setting(self, key: str, default=None):
+        if key in self.config:
+            return self.config[key]
+        return app_settings.defaults().get(key, default)
+
+    def set_setting(self, key: str | None, value) -> None:
+        if not key:
+            return
+        self.config[key] = value
+        self.save_config()
+        self.apply_runtime_setting(key)
+
+    def set_autostart(self, enabled: bool) -> None:
+        ok = app_settings.set_autostart(bool(enabled), STARTUP_VBS)
+        self.config["autostart"] = ok
+        self.save_config()
+
+    def apply_runtime_setting(self, key: str) -> None:
+        value = self.get_setting(key)
+        try:
+            if key == "interval":
+                self.sampler.interval = max(5.0, float(value))
+            elif key == "widget_topmost":
+                self.window.win.attributes("-topmost", bool(value))
+            elif key == "widget_opacity":
+                alpha = max(40, min(100, int(value))) / 100.0
+                self.window.win.attributes("-alpha", alpha)
+            elif key == "curve_range_hours" and self.curve is not None:
+                self.curve.range_var.set(int(value))
+                self.curve.refresh()
+        except Exception:
+            pass
+
+    def _test_popup(self) -> None:
+        percent = self.last_percent if self.last_percent is not None else 18
+        self._show_low_battery_popup(
+            percent=percent,
+            threshold=int(self.get_setting("low_battery_threshold")),
+            game_name=self._last_game_name or "测试游戏",
+        )
+
+    def _on_game_session_end(self, last_game_name: str) -> None:
+        """Steam 游戏全部退出时触发。"""
+        if not self.get_setting("low_battery_popup_enabled"):
+            return
+        if not self.get_setting("steam_watch_enabled"):
+            return
+        self._last_game_name = last_game_name
+        reading = self.last_reading
+        if reading is None:
+            return
+        if reading.charge_state != 0:          # 充电中 / 已充满不弹
+            return
+        self._maybe_popup_by_battery(reading, last_game_name)
+
+    def _maybe_popup_by_battery(self, reading, game_name: str) -> bool:
+        threshold = int(self.get_setting("low_battery_threshold"))
+        if reading.percent > threshold:
+            return False
+        if self._popup_done_for_cycle:
+            return False
+        if time.time() - self._popup_last < 600:  # 10 分钟冷却
+            return False
+        self._show_low_battery_popup(reading.percent, threshold, game_name)
+        return True
+
+    def _show_low_battery_popup(self, percent: int, threshold: int,
+                                game_name: str = "") -> None:
+        try:
+            if self._popup is not None:
+                self._popup._close()
+        except Exception:  # noqa: BLE001
+            pass
+        self._popup_last = time.time()
+        self._popup_done_for_cycle = True
+        self._popup = battery_popup.LowBatteryPopup(
+            self.root,
+            percent=percent,
+            threshold=threshold,
+            game_name=game_name,
+            sound=bool(self.get_setting("popup_sound")),
+            on_dismiss=self._on_popup_dismiss,
+            on_snooze=self._on_popup_snooze,
+        )
+
+    def _on_popup_dismiss(self) -> None:
+        self._popup = None
+
+    def _on_popup_snooze(self) -> None:
+        self._popup = None
+        # 10 分钟后再看一次：电量仍低于阈值就再弹
+        self.root.after(600_000, self._snooze_refire)
+
+    def _snooze_refire(self) -> None:
+        reading = self.last_reading
+        if reading is None or reading.charge_state != 0:
+            return
+        self._popup_done_for_cycle = False
+        self._maybe_popup_by_battery(reading, self._last_game_name)
+
+    def show_curve(self):
+        if self.curve is None:
+            self.curve = battery_curve.CurveWindow(self.root, self)
+        self.curve.show()
+
+    def _defer(self, fn) -> None:
+        """把菜单命令推迟到当前菜单事件循环退出后再执行。
+
+        Tk 的菜单命令是在 popup 的嵌套事件循环里跑的，此时创建新窗口
+        容易让 Tk 重入，推迟一拍最稳。
+        """
+        try:
+            self.root.after(0, fn)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _dispatch_tray_action(self, action: str) -> None:
+        """在 Tk 上下文里处理托盘动作（不能在 WNDPROC 里直接调用）。"""
+        if action == "left":
+            self.window.toggle()
+        elif action == "double":
+            self._force_refresh()
+        elif action == "right":
+            self.show_menu()
+        elif action == "readd":
+            try:
+                self.tray._add()
+            except Exception:  # noqa: BLE001
+                pass
+
     def show_menu(self):
         try:
             x, y = self.tray.cursor_pos()
             self.menu.tk_popup(x, y)
         finally:
-            self.menu.grab_release()
+            try:
+                self.menu.grab_release()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _force_refresh(self):
         self.sampler.force()
@@ -531,6 +732,8 @@ class BatteryApp:
     def _tick(self):
         try:
             self.tray.pump()
+            for action in self.tray.take_actions():
+                self._dispatch_tray_action(action)
         except Exception:
             pass
         updated = False
@@ -543,34 +746,112 @@ class BatteryApp:
             updated = True
             self.window.render(state, percent, detail)
             if state == "ok" and percent is not None:
+                if hasattr(detail, "charge_state"):
+                    self.last_reading = detail
+                    if not self.demo and self.get_setting("record_history"):
+                        try:
+                            self.history.record(percent, int(detail.charge_state))
+                        except Exception:
+                            pass
                 label = getattr(detail, "charge_label", "")
                 tip = f"G3M PRO — 电量 {percent}%"
                 if label and getattr(detail, "charge_state", 0):
                     tip += f"（{label}）"
             else:
+                self.last_reading = None
                 tip = f"G3M PRO — {detail or '未连接'}"
             self.tray.update(percent if state == "ok" else None, tip)
             self.last_percent = percent if state == "ok" else None
+        if updated and self.curve is not None and self.curve.visible:
+            try:
+                self.curve.refresh()
+            except Exception:
+                pass
+        self._drain_steam_events()
+        self._reset_popup_cycle_if_recovered()
+        self._maybe_anytime_low_battery_popup()
         self.root.after(150, self._tick)
 
-    def quit(self):
+    def _maybe_anytime_low_battery_popup(self) -> None:
+        """可选：不限于游戏结束，电量低于阈值就提醒。"""
+        if not self.get_setting("popup_on_low_anytime"):
+            return
+        if not self.get_setting("low_battery_popup_enabled"):
+            return
+        reading = self.last_reading
+        if reading is None or reading.charge_state != 0:
+            return
+        self._maybe_popup_by_battery(reading, "")
+
+    def _drain_steam_events(self) -> None:
+        if not self.get_setting("steam_watch_enabled"):
+            # 丢弃事件，避免关掉监视后仍弹窗
+            while True:
+                try:
+                    self.steam_watcher.out.get_nowait()
+                except queue.Empty:
+                    return
+        while True:
+            try:
+                kind, _appid, name = self.steam_watcher.out.get_nowait()
+            except queue.Empty:
+                return
+            # 只有「所有 Steam 游戏都退出」才算一局结束，避免多开时误弹
+            if kind == "end" and not self.steam_watcher.tracker.has_running:
+                self._on_game_session_end(name)
+
+    def _reset_popup_cycle_if_recovered(self) -> None:
+        """电量回血或开始充电后，允许本轮再次提醒。"""
+        reading = self.last_reading
+        if reading is None:
+            return
+        threshold = int(self.get_setting("low_battery_threshold"))
+        if reading.charge_state != 0 or reading.percent > threshold + 5:
+            self._popup_done_for_cycle = False
+
+    def shutdown(self) -> None:
+        """幂等清理：停线程、拆托盘窗口。任何退出路径都必须经过这里。"""
+        if getattr(self, "_shutdown_done", False):
+            return
+        self._shutdown_done = True
         try:
-            self.save_window_pos(self.window.win.winfo_x(), self.window.win.winfo_y())
+            self.save_window_pos(self.window.win.winfo_x(),
+                                 self.window.win.winfo_y())
         except Exception:
             pass
-        try:
-            self.sampler.stop()
-        except Exception:
-            pass
+        for thread, timeout in ((getattr(self, "sampler", None), 3.0),
+                                (getattr(self, "steam_watcher", None), 2.0)):
+            if thread is None:
+                continue
+            try:
+                thread.stop()
+                if thread.is_alive():
+                    thread.join(timeout=timeout)
+            except Exception:  # noqa: BLE001
+                pass
         try:
             self.tray.destroy()
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
-        self.root.quit()
-        self.root.destroy()
+
+    def quit(self):
+        self.shutdown()
+        try:
+            self.root.quit()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.root.destroy()
+        except Exception:  # noqa: BLE001
+            pass
 
     def run(self):
-        self.root.mainloop()
+        try:
+            self.root.mainloop()
+        finally:
+            # 无论 mainloop 是正常返回、被 quit 还是异常退出，都走同一套清理，
+            # 保证没有线程在解释器 finalize 时还活着。
+            self.shutdown()
 
 
 def main(argv: list[str]) -> int:
@@ -591,7 +872,17 @@ def main(argv: list[str]) -> int:
 
     ensure_icons()
     app = BatteryApp(demo=demo, show_window=show_window, demo_percent=demo_percent)
-    app.run()
+    try:
+        if "--curve" in argv:
+            app.show_curve()
+        if "--settings" in argv:
+            app.show_settings()
+        if "--test-popup" in argv:
+            app.root.after(1500, app._test_popup)
+        app.run()
+    finally:
+        # 双保险：即使 app.run() 之外的代码抛异常，也不留下活线程
+        app.shutdown()
     return 0
 
 
